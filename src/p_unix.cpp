@@ -38,6 +38,65 @@
 #include "p_unix.h"
 #include "p_elf.h"
 
+// Lightweight obfuscation stream cipher (TEA-derived) for encrypting block data.
+// Key is derived from a 16-byte salt (per file) plus block index.
+namespace {
+
+static void derive_key(const unsigned char salt[16], uint32_t block_index, uint32_t k[4]) {
+    for (int i = 0; i < 4; ++i) {
+        k[i] =  (uint32_t)salt[i*4 + 0]
+              | (uint32_t)salt[i*4 + 1] << 8
+              | (uint32_t)salt[i*4 + 2] << 16
+              | (uint32_t)salt[i*4 + 3] << 24;
+    }
+    k[0] ^= 0x9e3779b9u ^ block_index;
+    k[1] ^= 0x7f4a7c15u ^ (block_index << 7);
+    k[2] ^= 0x3c6ef372u ^ (block_index >> 3);
+    k[3] ^= 0xbb67ae85u ^ (block_index << 13);
+}
+
+static void tea_keystream(uint32_t counter, const uint32_t k[4], unsigned char out[8]) {
+    uint32_t v0 = counter;
+    uint32_t v1 = counter ^ 0xdeadbeefu;
+    uint32_t sum = 0;
+    const uint32_t delta = 0x9e3779b9u;
+    for (unsigned i = 0; i < 16; ++i) {
+        sum += delta;
+        v0 += ((v1 << 4) + k[0]) ^ (v1 + sum) ^ ((v1 >> 5) + k[1]);
+        v1 += ((v0 << 4) + k[2]) ^ (v0 + sum) ^ ((v0 >> 5) + k[3]);
+    }
+    out[0] = (unsigned char)(v0);
+    out[1] = (unsigned char)(v0 >> 8);
+    out[2] = (unsigned char)(v0 >> 16);
+    out[3] = (unsigned char)(v0 >> 24);
+    out[4] = (unsigned char)(v1);
+    out[5] = (unsigned char)(v1 >> 8);
+    out[6] = (unsigned char)(v1 >> 16);
+    out[7] = (unsigned char)(v1 >> 24);
+}
+
+static void encrypt_buffer(const unsigned char salt[16], uint32_t block_index,
+                           unsigned char *buf, unsigned len) {
+    if (len == 0) return;
+    uint32_t k[4];
+    derive_key(salt, block_index, k);
+    uint32_t counter = 0;
+    unsigned pos = 0;
+    unsigned char ks[8];
+    while (pos < len) {
+        tea_keystream(counter++, k, ks);
+        unsigned chunk = (len - pos) < 8 ? (len - pos) : 8;
+        for (unsigned i = 0; i < chunk; ++i) {
+            buf[pos + i] ^= ks[i];
+        }
+        pos += chunk;
+    }
+}
+
+static unsigned char g_enc_salt[16];
+static bool g_enc_salt_valid = false;
+}
+
 // do not change
 #define BLOCKSIZE       (512*1024)
 
@@ -162,6 +221,7 @@ int PackUnix::pack2(OutputFile *fo, Filter &ft)
     unsigned n_block = 0;
     while (remaining > 0)
     {
+        uint32_t enc_block_index = n_block;
         // FIXME: disable filters if we have more than one block.
         // FIXME: There is only 1 un-filter in the stub [as of 2002-11-10].
         // So the next block really has no choice!
@@ -222,10 +282,14 @@ int PackUnix::pack2(OutputFile *fo, Filter &ft)
 
         // write compressed data
         if (ph.c_len < ph.u_len) {
+            if (g_enc_salt_valid)
+                encrypt_buffer(g_enc_salt, enc_block_index, obuf, ph.c_len);
             fo->write(obuf, ph.c_len);
             verifyOverlappingDecompression();  // uses ph.u_adler
         }
         else {
+            if (g_enc_salt_valid)
+                encrypt_buffer(g_enc_salt, enc_block_index, ibuf, ph.u_len);
             fo->write(ibuf, ph.u_len);
         }
         ph.u_adler = end_u_adler;
@@ -312,6 +376,14 @@ void PackUnix::pack(OutputFile *fo)
         set_te32(&hbuf.p_filesize, file_size);
         set_te32(&hbuf.p_blocksize, blocksize);
         fo->write(&hbuf, sizeof(hbuf));
+    }
+
+    g_enc_salt_valid = (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386);
+    if (g_enc_salt_valid) {
+        for (unsigned i = 0; i < sizeof(g_enc_salt); ++i) {
+            g_enc_salt[i] = (unsigned char)(upx_rand() & 0xff);
+        }
+        fo->write(g_enc_salt, sizeof(g_enc_salt));
     }
 
     // append the compressed body

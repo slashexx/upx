@@ -48,6 +48,58 @@ void *mmap(void *, size_t, int, int, int, off_t);
 #endif  //}
 ssize_t write(int, void const *, size_t);
 
+// Lightweight TEA-derived stream cipher for payload obfuscation.
+static void derive_key(const unsigned char salt[16], unsigned block_index, uint32_t k[4]) {
+    k[0] = (uint32_t)salt[0]  | (uint32_t)salt[1]  << 8 | (uint32_t)salt[2]  << 16 | (uint32_t)salt[3]  << 24;
+    k[1] = (uint32_t)salt[4]  | (uint32_t)salt[5]  << 8 | (uint32_t)salt[6]  << 16 | (uint32_t)salt[7]  << 24;
+    k[2] = (uint32_t)salt[8]  | (uint32_t)salt[9]  << 8 | (uint32_t)salt[10] << 16 | (uint32_t)salt[11] << 24;
+    k[3] = (uint32_t)salt[12] | (uint32_t)salt[13] << 8 | (uint32_t)salt[14] << 16 | (uint32_t)salt[15] << 24;
+    k[0] ^= 0x9e3779b9u ^ block_index;
+    k[1] ^= 0x7f4a7c15u ^ (block_index << 7);
+    k[2] ^= 0x3c6ef372u ^ (block_index >> 3);
+    k[3] ^= 0xbb67ae85u ^ (block_index << 13);
+}
+
+static void tea_keystream(uint32_t counter, const uint32_t k[4], unsigned char out[8]) {
+    uint32_t v0 = counter;
+    uint32_t v1 = counter ^ 0xdeadbeefu;
+    uint32_t sum = 0;
+    const uint32_t delta = 0x9e3779b9u;
+    unsigned i;
+    for (i = 0; i < 16; ++i) {
+        sum += delta;
+        v0 += ((v1 << 4) + k[0]) ^ (v1 + sum) ^ ((v1 >> 5) + k[1]);
+        v1 += ((v0 << 4) + k[2]) ^ (v0 + sum) ^ ((v0 >> 5) + k[3]);
+    }
+    out[0] = (unsigned char)(v0);
+    out[1] = (unsigned char)(v0 >> 8);
+    out[2] = (unsigned char)(v0 >> 16);
+    out[3] = (unsigned char)(v0 >> 24);
+    out[4] = (unsigned char)(v1);
+    out[5] = (unsigned char)(v1 >> 8);
+    out[6] = (unsigned char)(v1 >> 16);
+    out[7] = (unsigned char)(v1 >> 24);
+}
+
+static void decrypt_buffer(const unsigned char salt[16], unsigned block_index,
+                           unsigned char *buf, unsigned len) {
+    if (len == 0) return;
+    uint32_t k[4];
+    derive_key(salt, block_index, k);
+    uint32_t counter = 0;
+    unsigned pos = 0;
+    unsigned char ks[8];
+    while (pos < len) {
+        tea_keystream(counter++, k, ks);
+        unsigned chunk = (len - pos) < 8 ? (len - pos) : 8;
+        unsigned i;
+        for (i = 0; i < chunk; ++i) {
+            buf[pos + i] ^= ks[i];
+        }
+        pos += chunk;
+    }
+}
+
 
 /*************************************************************************
 // configuration section
@@ -298,6 +350,11 @@ unpackExtent(
     f_unfilter *f_unf
 )
 {
+    unsigned char enc_salt[16];
+    unsigned dec_block_index = 0;
+    if (xi->size < sizeof(enc_salt))
+        err_exit(1);
+    xread(xi, (char *)enc_salt, sizeof(enc_salt));
     DPRINTF("unpackExtent in=%%p(%%x %%p)  out=%%p(%%x %%p)  %%p %%p\\n",
         xi, xi->size, xi->buf, xo, xo->size, xo->buf, f_exp, f_unf);
     while (xo->size) {
@@ -327,6 +384,8 @@ ERR_LAB
         //   assert(h.sz_cpr <= h.sz_unc);
         //   assert(h.sz_unc > 0 && h.sz_unc <= blocksize);
         //   assert(h.sz_cpr > 0 && h.sz_cpr <= blocksize);
+
+        decrypt_buffer(enc_salt, dec_block_index++, (unsigned char *)xi->buf, h.sz_cpr);
 
         if (h.sz_cpr < h.sz_unc) { // Decompress block
             size_t out_len = h.sz_unc;  // EOF for lzma
