@@ -378,7 +378,8 @@ void PackUnix::pack(OutputFile *fo)
         fo->write(&hbuf, sizeof(hbuf));
     }
 
-    g_enc_salt_valid = (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386);
+    g_enc_salt_valid = (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386
+        || ph.format == UPX_F_LINUX_ELF64_AMD64);
     if (g_enc_salt_valid) {
         for (unsigned i = 0; i < sizeof(g_enc_salt); ++i) {
             g_enc_salt[i] = (unsigned char)(upx_rand() & 0xff);
