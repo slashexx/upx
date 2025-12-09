@@ -97,6 +97,24 @@ static unsigned char g_enc_salt[16];
 static bool g_enc_salt_valid = false;
 }
 
+static void decrypt_buffer(const unsigned char salt[16], uint32_t block_index,
+                           unsigned char *buf, unsigned len) {
+    if (len == 0) return;
+    uint32_t k[4];
+    derive_key(salt, block_index, k);
+    uint32_t counter = 0;
+    unsigned pos = 0;
+    unsigned char ks[8];
+    while (pos < len) {
+        tea_keystream(counter++, k, ks);
+        unsigned chunk = (len - pos) < 8 ? (len - pos) : 8;
+        for (unsigned i = 0; i < chunk; ++i) {
+            buf[pos + i] ^= ks[i];
+        }
+        pos += chunk;
+    }
+}
+
 // do not change
 #define BLOCKSIZE       (512*1024)
 
@@ -282,15 +300,25 @@ int PackUnix::pack2(OutputFile *fo, Filter &ft)
 
         // write compressed data
         if (ph.c_len < ph.u_len) {
-            if (g_enc_salt_valid)
+            if (g_enc_salt_valid) {
+                // Encrypt in place, write, then decrypt back to restore buffer
                 encrypt_buffer(g_enc_salt, enc_block_index, obuf, ph.c_len);
-            fo->write(obuf, ph.c_len);
+                fo->write(obuf, ph.c_len);
+                decrypt_buffer(g_enc_salt, enc_block_index, obuf, ph.c_len);
+            } else {
+                fo->write(obuf, ph.c_len);
+            }
             verifyOverlappingDecompression();  // uses ph.u_adler
         }
         else {
-            if (g_enc_salt_valid)
+            if (g_enc_salt_valid) {
+                // Encrypt in place, write, then decrypt back to restore buffer
                 encrypt_buffer(g_enc_salt, enc_block_index, ibuf, ph.u_len);
-            fo->write(ibuf, ph.u_len);
+                fo->write(ibuf, ph.u_len);
+                decrypt_buffer(g_enc_salt, enc_block_index, ibuf, ph.u_len);
+            } else {
+                fo->write(ibuf, ph.u_len);
+            }
         }
         ph.u_adler = end_u_adler;
 
@@ -666,6 +694,15 @@ int PackUnix::find_overlay_offset(MemBuffer const &buf)
     if (l < 0 || i + l + 4 > bufsize)
         throwCantUnpack("file corrupted");
     overlay_offset = get_te32(buf + i + l);
+    
+    // For encrypted formats, add salt size to overlay calculations
+    bool uses_salt = (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386
+        || ph.format == UPX_F_LINUX_ELF64_AMD64);
+    if (uses_salt) {
+        // overlay_offset points to p_info, and salt comes after p_info (12 bytes)
+        // No adjustment needed here - overlay_offset is correct
+    }
+    
     if ((off_t)overlay_offset >= file_size)
         throwCantUnpack("file corrupted");
 
@@ -712,6 +749,15 @@ void PackUnix::unpack(OutputFile *fo)
     {
         // skip 4 bytes (program id)
         fi->seek(4, SEEK_CUR);
+    }
+
+    bool dec_use_salt = (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386
+        || ph.format == UPX_F_LINUX_ELF64_AMD64);
+    uint32_t dec_block_index = 0;
+    if (dec_use_salt) {
+        unsigned char saltbuf[16];
+        fi->readx(saltbuf, sizeof(saltbuf));
+        memcpy(g_enc_salt, saltbuf, sizeof(g_enc_salt));
     }
 
     if ((int)(blocksize + OVERHEAD) < 0)
@@ -762,7 +808,13 @@ void PackUnix::unpack(OutputFile *fo)
         if (i < 0)
             throwCantUnpack("corrupt b_info %#x %#x", sz_cpr, blocksize);
         fi->readx(buf+i, sz_cpr);
-        // update checksum of compressed data
+        // update checksum of compressed data (before decrypt for debugging)
+        //c_adler = upx_adler32(buf + i, sz_cpr, c_adler);
+        // decrypt payload if enabled
+        if (dec_use_salt) {
+            decrypt_buffer(g_enc_salt, dec_block_index++, buf + i, sz_cpr);
+        }
+        // update checksum of compressed data (after decrypt)
         c_adler = upx_adler32(buf + i, sz_cpr, c_adler);
         // decompress
         if (sz_cpr < sz_unc) {

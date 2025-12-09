@@ -82,6 +82,8 @@ static int dprintf(char const *fmt, ...); // forward
 extern void my_bkpt(void *, ...);
 
 // Lightweight TEA-derived stream cipher for payload obfuscation (must match packer).
+static unsigned char g_enc_salt[16];
+
 static void derive_key(const unsigned char salt[16], unsigned block_index, uint32_t k[4]) {
     k[0] = (uint32_t)salt[0]  | (uint32_t)salt[1]  << 8 | (uint32_t)salt[2]  << 16 | (uint32_t)salt[3]  << 24;
     k[1] = (uint32_t)salt[4]  | (uint32_t)salt[5]  << 8 | (uint32_t)salt[6]  << 16 | (uint32_t)salt[7]  << 24;
@@ -212,11 +214,8 @@ unpackExtent(
     f_unfilter *f_unf
 )
 {
-    unsigned char enc_salt[16];
+    // Note: salt is now read in upx_main before calling this, and g_enc_salt is already set
     unsigned dec_block_index = 0;
-    if (xi->size < sizeof(enc_salt))
-        err_exit(1);
-    xread(xi, (char *)enc_salt, sizeof(enc_salt));
     while (xo->size) {
         DPRINTF("unpackExtent xi=(%%p %%p)  xo=(%%p %%p)  f_exp=%%p  f_unf=%%p\\n",
             xi->size, xi->buf, xo->size, xo->buf, f_exp, f_unf);
@@ -248,7 +247,11 @@ ERR_LAB
         //   assert(h.sz_unc > 0 && h.sz_unc <= blocksize);
         //   assert(h.sz_cpr > 0 && h.sz_cpr <= blocksize);
 
-        decrypt_buffer(enc_salt, dec_block_index++, (unsigned char *)xi->buf, h.sz_cpr);
+        // Decrypt block payload before decompression
+#if defined(__x86_64)  // Only for encrypted format
+        decrypt_buffer(g_enc_salt, dec_block_index, (unsigned char *)xi->buf, h.sz_cpr);
+#endif
+        dec_block_index++;
 
         if (h.sz_cpr < h.sz_unc) { // Decompress block
             size_t out_len = h.sz_unc;  // EOF for lzma
@@ -686,6 +689,14 @@ upx_main(  // returns entry address
 #endif  //}
 )
 {
+    // For Linux x86_64, bi now correctly points to b_info after O_BINFO adjustment.
+    // Salt is 16 bytes before bi, so read it back.
+#if defined(__x86_64)
+    const unsigned char *salt = ((const unsigned char *)bi) - 16;
+    unsigned i;
+    for (i = 0; i < 16; ++i) g_enc_salt[i] = salt[i];
+#endif
+
     Extent xo, xi1, xi2;
     xo.buf  = (char *)ehdr;
     xo.size = bi->sz_unc;

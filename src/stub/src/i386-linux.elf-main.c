@@ -49,6 +49,8 @@ void *mmap(void *, size_t, int, int, int, off_t);
 ssize_t write(int, void const *, size_t);
 
 // Lightweight TEA-derived stream cipher for payload obfuscation.
+static unsigned char g_enc_salt[16];
+
 static void derive_key(const unsigned char salt[16], unsigned block_index, uint32_t k[4]) {
     k[0] = (uint32_t)salt[0]  | (uint32_t)salt[1]  << 8 | (uint32_t)salt[2]  << 16 | (uint32_t)salt[3]  << 24;
     k[1] = (uint32_t)salt[4]  | (uint32_t)salt[5]  << 8 | (uint32_t)salt[6]  << 16 | (uint32_t)salt[7]  << 24;
@@ -350,11 +352,8 @@ unpackExtent(
     f_unfilter *f_unf
 )
 {
-    unsigned char enc_salt[16];
+    // Note: salt is now read in upx_main before calling this, and g_enc_salt is already set
     unsigned dec_block_index = 0;
-    if (xi->size < sizeof(enc_salt))
-        err_exit(1);
-    xread(xi, (char *)enc_salt, sizeof(enc_salt));
     DPRINTF("unpackExtent in=%%p(%%x %%p)  out=%%p(%%x %%p)  %%p %%p\\n",
         xi, xi->size, xi->buf, xo, xo->size, xo->buf, f_exp, f_unf);
     while (xo->size) {
@@ -385,7 +384,11 @@ ERR_LAB
         //   assert(h.sz_unc > 0 && h.sz_unc <= blocksize);
         //   assert(h.sz_cpr > 0 && h.sz_cpr <= blocksize);
 
-        decrypt_buffer(enc_salt, dec_block_index++, (unsigned char *)xi->buf, h.sz_cpr);
+        // Decrypt block payload before decompression
+#if defined(__i386__)  // Only for encrypted format
+        decrypt_buffer(g_enc_salt, dec_block_index, (unsigned char *)xi->buf, h.sz_cpr);
+#endif
+        dec_block_index++;
 
         if (h.sz_cpr < h.sz_unc) { // Decompress block
             size_t out_len = h.sz_unc;  // EOF for lzma
@@ -987,6 +990,16 @@ void *upx_main(
     xj.buf = CONST_CAST(char *, bi); xj.size = sizeof(*bi) + bi->sz_cpr;
 #endif  //}
 
+#if defined(__i386__)  // Encrypted format - salt present
+    // For Linux i386, xi.buf now correctly points to b_info after O_BINFO adjustment.
+    // Salt is 16 bytes before xi.buf, so read it back.
+    {
+        const unsigned char *salt = ((const unsigned char *)xi.buf) - 16;
+        unsigned i;
+        for (i = 0; i < 16; ++i) g_enc_salt[i] = salt[i];
+    }
+#endif
+
     DPRINTF("upx_main@%%p av=%%p  szc=%%x  f_exp=%%p  f_unf=%%p  "
             "  xo=%%p(%%x %%p)  xi=%%p(%%x %%p)  elfaddr=%%x\\n",
         upx_main, av, sz_compressed, f_exp, f_unf, &xo, xo.size, xo.buf,
@@ -1000,7 +1013,11 @@ void *upx_main(
     unpackExtent(&xi, &xo, f_exp, 0);
     // Prepare to decompress the Elf headers again, into the first PT_LOAD.
     xi.buf  -= sz_first;
+#if defined(__i386__)
+    xi.size  = sz_compressed - 16;  // subtract salt from total
+#else
     xi.size  = sz_compressed;
+#endif
 #endif  // !__mips__ }
 
     Elf32_Addr reloc = elfaddr;  // ET_EXEC problem!

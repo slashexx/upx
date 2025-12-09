@@ -3891,6 +3891,10 @@ PackLinuxElf32::generateElfHdr(
     sz_elf_hdrs = sizeof(Elf32_Ehdr) + phnum_o * sizeof(Elf32_Phdr) + sz_phdrx;
     overlay_offset = sz_elf_hdrs + sizeof(l_info);
     o_binfo        = sz_elf_hdrs + sizeof(l_info) + sizeof(p_info);
+    // Add 16 bytes for salt in Linux i386 format
+    if (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386) {
+        o_binfo += 16;
+    }
 
     l_info linfo2; memset(&linfo2, 0, sizeof(linfo2));
     fo->write(&linfo2, sizeof(linfo2));
@@ -4136,6 +4140,10 @@ PackLinuxElf64::generateElfHdr(
     unsigned       phnum_o = 2 + n_phdrx;  // C_BASE, C_TEXT
     set_te16(&h2->ehdr.e_phnum, phnum_o);
     o_binfo =  sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr)*phnum_o + sizeof(l_info) + sizeof(p_info);
+    // Add 16 bytes for salt in Linux x86_64 format
+    if (ph.format == UPX_F_LINUX_ELF64_AMD64) {
+        o_binfo += 16;
+    }
     set_te64(&h2->phdr[C_TEXT].p_filesz, sizeof(*h2));  // + identsize;
               h2->phdr[C_TEXT].p_memsz = h2->phdr[C_TEXT].p_filesz;
     set_te32(&h2->phdr[C_TEXT].p_type, PT_LOAD);  // be sure
@@ -4208,6 +4216,10 @@ PackLinuxElf64::generateElfHdr(
     sz_elf_hdrs = sizeof(Elf64_Ehdr) + phnum_o * sizeof(Elf64_Phdr) + sz_phdrx;
     overlay_offset = sz_elf_hdrs + sizeof(l_info);
     o_binfo        = sz_elf_hdrs + sizeof(l_info) + sizeof(p_info);
+    // Add 16 bytes for salt in Linux x86_64 format
+    if (ph.format == UPX_F_LINUX_ELF64_AMD64) {
+        o_binfo += 16;
+    }
 
     l_info linfo2; memset(&linfo2, 0, sizeof(linfo2));
     fo->write(&linfo2, sizeof(linfo2));
@@ -7657,6 +7669,12 @@ void PackLinuxElf64::unpack(OutputFile *fo)
         || !mem_size_valid(1, blocksize, OVERHEAD))
         throwCantUnpack("p_info corrupted");
 
+    // Skip salt for encrypted formats
+    if (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386 || 
+        ph.format == UPX_F_LINUX_ELF64_AMD64) {
+        fi->seek(16, SEEK_CUR);  // skip 16-byte salt
+    }
+
     ibuf.alloc(blocksize + OVERHEAD);
     b_info bhdr; memset(&bhdr, 0, sizeof(bhdr));
     fi->readx(&bhdr, szb_info);
@@ -8910,6 +8928,12 @@ void PackLinuxElf32::unpack(OutputFile *fo)
         ||      (blocksize >> 8) > (u32_t)file_size
         || !mem_size_valid(1, blocksize, OVERHEAD))
         throwCantUnpack("p_info corrupted");
+
+    // Skip salt for encrypted formats
+    if (ph.format == UPX_F_LINUX_ELF_i386 || ph.format == UPX_F_LINUX_i386 || 
+        ph.format == UPX_F_LINUX_ELF64_AMD64) {
+        fi->seek(16, SEEK_CUR);  // skip 16-byte salt
+    }
 
     ibuf.alloc(blocksize + OVERHEAD);
     b_info bhdr; memset(&bhdr, 0, sizeof(bhdr));
